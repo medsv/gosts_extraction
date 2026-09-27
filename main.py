@@ -1,0 +1,157 @@
+"""CLI-приложение: анализ PDF-файлов на наличие ГОСТ/ТУ/СП и формирование
+файла «Перечень_НТД.xlsx» на основе шаблона.
+
+Запуск из консоли:
+    python main.py <файл.pdf|папка> [<файл2.pdf|папка2> ...] [--template ШАБЛОН]
+                  [--out ПАПКА] [--recursive]
+
+Каждый PDF-файл обрабатывается отдельно, по каждому файлу формируется свой
+перечень ГОСТов. Результат сводится в один XLSX-файл с именем вида
+YY-MM-DD_HH-MM_Перечень_НТД.xlsx.
+
+Ядро вынесено в пакет libs (gost_parser, xlsx_writer, models) — те же функции
+будут использоваться Streamlit-приложением (app.py).
+"""
+
+import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from libs.models import FileResult
+from libs.pipeline import build_rows, process_pdf_file
+from libs.xlsx_writer import analysis_to_xlsx_bytes
+
+# Колонки шаблона «Перечень_НТД.xlsx»
+COL_NO = 0      # A: №
+COL_NTD = 1     # B: НТД
+COL_COUNT = 2   # C: Кол-во упоминаний
+COL_PAGES = 3   # D: Номера листов файла pdf
+COL_FILENAME = 4  # E: Название файла
+
+DEFAULT_TEMPLATE = Path(__file__).parent / "Перечень_НТД.xlsx"
+
+
+def collect_pdf_files(paths: list[str], recursive: bool) -> list[Path]:
+    """Собирает список PDF-файлов из переданных путей.
+
+    Файлы добавляются напрямую, папки — поиском *.pdf (рекурсивно,
+    если recursive=True). Отсутствующие пути и не-PDF файлы пропускаются
+    с предупреждением. Дубликаты устраняются (по resolve()).
+    """
+    pdf_files: dict[Path, None] = {}
+    for raw in paths:
+        p = Path(raw)
+        if not p.exists():
+            print(f"ПРЕДУПРЕЖДЕНИЕ: путь не найден, пропуск: {raw}", file=sys.stderr)
+            continue
+        if p.is_file():
+            if p.suffix.lower() == ".pdf":
+                pdf_files.setdefault(p.resolve(), None)
+            else:
+                print(f"ПРЕДУПРЕЖДЕНИЕ: не PDF-файл, пропуск: {raw}", file=sys.stderr)
+        elif p.is_dir():
+            pattern = "**/*.pdf" if recursive else "*.pdf"
+            found = sorted(p.glob(pattern))
+            if not found:
+                print(f"ПРЕДУПРЕЖДЕНИЕ: в папке нет PDF-файлов: {p}", file=sys.stderr)
+            for f in found:
+                if f.is_file():
+                    pdf_files.setdefault(f.resolve(), None)
+    return list(pdf_files.keys())
+
+
+def build_output_path(out_dir: str | Path | None, now: datetime | None = None) -> Path:
+    """Формирует путь выходного файла YY-MM-DD_HH-MM_Перечень_НТД.xlsx."""
+    now = now or datetime.now()
+    stamp = now.strftime("%y-%m-%d_%H-%M")
+    out_dir = Path(out_dir) if out_dir else Path.cwd()
+    return out_dir / f"{stamp}_Перечень_НТД.xlsx"
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="main.py",
+        description=(
+            "Анализ PDF-файлов на наличие ГОСТ/ТУ/СП и формирование "
+            "перечня НТД в XLSX на основе шаблона «Перечень_НТД.xlsx»."
+        ),
+        epilog=(
+            "Примеры:\n"
+            "  python main.py doc.pdf\n"
+            "  python main.py dir1 dir2/file.pdf --recursive\n"
+            "  python main.py dir --template template.xlsx --out results\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "paths",
+        nargs="+",
+        help="PDF-файлы и/или папки с PDF-файлами",
+    )
+    parser.add_argument(
+        "--template",
+        default=str(DEFAULT_TEMPLATE),
+        help=f"Путь к шаблону XLSX (по умолчанию: {DEFAULT_TEMPLATE.name})",
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="Папка для сохранения результата (по умолчанию: текущая)",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Рекурсивно искать PDF-файлы в переданных папках",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+
+    print("Анализ PDF на наличие ГОСТ/ТУ/СП")
+
+    pdf_files = collect_pdf_files(args.paths, args.recursive)
+    if not pdf_files:
+        print("Не найдено ни одного PDF-файла для обработки.", file=sys.stderr)
+        return 1
+
+    print(f"Найдено PDF-файлов: {len(pdf_files)}\n")
+
+    results: list[FileResult] = []
+    for i, pdf_path in enumerate(pdf_files, start=1):
+        print(f"[{i}/{len(pdf_files)}] Обработка: {pdf_path.name} ...")
+        result = process_pdf_file(pdf_path)
+        if result.is_ok:
+            total = sum(e["count"] for e in result.gosts.values())
+            print(f"    Упоминаний ГОСТ: {total}, уникальных: {len(result.gosts)}")
+        else:
+            print(f"    ОШИБКА: {result.error}", file=sys.stderr)
+        results.append(result)
+
+    ok_count = sum(1 for r in results if r.is_ok)
+    err_count = len(results) - ok_count
+    print(f"\nУспешно обработано: {ok_count}, с ошибками: {err_count}")
+
+    rows = build_rows(results)
+    if not rows:
+        print("Нет данных для записи в XLSX (в обработанных файлах ГОСТы не найдены).")
+        return 1
+
+    try:
+        xlsx_bytes = analysis_to_xlsx_bytes(rows, args.template)
+    except FileNotFoundError as e:
+        print(f"ОШИБКА: {e}", file=sys.stderr)
+        return 1
+
+    out_path = build_output_path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(xlsx_bytes)
+    print(f"\nГотово! Перечень сохранён: {out_path}")
+    print(f"Всего строк в перечне: {len(rows)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
