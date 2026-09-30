@@ -1,12 +1,15 @@
-"""Парсер ГОСТ/ТУ/СП из текста PDF-документов.
+"""Парсер ГОСТ/ТУ/СП из текста документов (PDF и DOCX).
 
 Содержит регулярное выражение для поиска обозначений нормативно-технической
 документации (ГОСТ, ТУ, СП), функции нормализации найденных обозначений
-и постраничного анализа PDF-файла через PyMuPDF.
+и постраничного анализа PDF-файла через PyMuPDF, а также анализа
+DOCX-файлов через python-docx.
 """
 
 import re
+from io import BytesIO
 
+import docx
 import pymupdf
 
 # Регулярное выражение для поиска ГОСТов (ГОСТ, ГОСТ Р, ГОСТ ЕН и т.п.),
@@ -96,13 +99,72 @@ def extract_gosts(text: str) -> list[str]:
     return list(found.keys())
 
 
+def _analyze_units(units: list[str]) -> dict[str, dict]:
+    """Анализирует список текстовых единиц и собирает статистику по ГОСТ/ТУ/СП.
+
+    Каждая единица (страница PDF или абзац DOCX) обрабатывается отдельно,
+    чтобы знать «локацию» каждого упоминания. Пустые единицы пропускаются.
+
+    Возвращает словарь вида:
+        {
+            "ГОСТ 21.110-2013": {"count": 3, "pages": [1, 4, 7]},
+            ...
+        }
+    где count — общее число упоминаний во всём документе, а pages —
+    отсортированный список номеров единиц (страниц/абзацев, с 1),
+    на которых ГОСТ упомянут хотя бы раз.
+    """
+    result: dict[str, dict] = {}
+    for idx, text in enumerate(units, start=1):
+        if not text or not text.strip():
+            continue
+        seen_on_unit: set[str] = set()
+        for key in iter_gost_matches(text):
+            entry = result.setdefault(key, {"count": 0, "pages": []})
+            entry["count"] += 1
+            if key not in seen_on_unit:
+                seen_on_unit.add(key)
+                entry["pages"].append(idx)
+    # Сортировка номеров единиц и итоговая сортировка по названию ГОСТ
+    for entry in result.values():
+        entry["pages"].sort()
+    return dict(sorted(result.items()))
+
+
+def _iter_docx_text(doc) -> list[str]:
+    """Собирает текст DOCX-документа в виде списка единиц (абзацев).
+
+    Учитываются абзацы основного документа, всех таблиц (включая вложенные)
+    и колонтитулы секций — ГОСТы часто встречаются именно в таблицах
+    (например, ведомости и перечни).
+    """
+    units: list[str] = [p.text for p in doc.paragraphs]
+
+    def walk_table(table) -> None:
+        for row in table.rows:
+            for cell in row.cells:
+                units.extend(p.text for p in cell.paragraphs)
+                for nested in cell.tables:
+                    walk_table(nested)
+
+    for table in doc.tables:
+        walk_table(table)
+
+    for section in doc.sections:
+        for header_footer in (section.header, section.footer):
+            if header_footer is not None:
+                units.extend(p.text for p in header_footer.paragraphs)
+
+    return units
+
+
 def _analyze_document(doc) -> dict[str, dict]:
     """Постранично анализирует открытый PyMuPDF-документ.
 
     Страницы без текста (чертежи, отсканированные растровые листы)
     пропускаются без анализа для ускорения работы.
     """
-    result: dict[str, dict] = {}
+    units: list[str] = []
     # Итерация по индексам через load_page() даёт явный тип Page
     # (итератор Document в стабах PyMuPDF не типизирован).
     for i in range(doc.page_count):
@@ -114,18 +176,8 @@ def _analyze_document(doc) -> dict[str, dict]:
         # анализировать нечего, пропускаем страницу.
         if not text.strip():
             continue
-        page_number = i + 1  # номер листа (с 1)
-        seen_on_page: set[str] = set()
-        for key in iter_gost_matches(text):
-            entry = result.setdefault(key, {"count": 0, "pages": []})
-            entry["count"] += 1
-            if key not in seen_on_page:
-                seen_on_page.add(key)
-                entry["pages"].append(page_number)
-    # Сортировка номеров листов и итоговая сортировка по названию ГОСТ
-    for entry in result.values():
-        entry["pages"].sort()
-    return dict(sorted(result.items()))
+        units.append(text)
+    return _analyze_units(units)
 
 
 def analyze_pdf(pdf_path: str) -> dict[str, dict]:
@@ -158,3 +210,23 @@ def analyze_pdf_bytes(pdf_bytes: bytes) -> dict[str, dict]:
         return _analyze_document(doc)
     finally:
         doc.close()
+
+
+def analyze_docx(docx_path: str) -> dict[str, dict]:
+    """Поабзацно анализирует DOCX-файл и собирает статистику по ГОСТ/ТУ/СП.
+
+    Единицей анализа служит абзац документа (а также текст из таблиц
+    и колонтитулов): в «pages» попадают порядковые номера абзацев.
+    Возвращает ту же структуру, что и analyze_pdf().
+    """
+    doc = docx.Document(docx_path)
+    return _analyze_units(_iter_docx_text(doc))
+
+
+def analyze_docx_bytes(docx_bytes: bytes) -> dict[str, dict]:
+    """Анализирует DOCX из байтов (например, загруженный через Streamlit).
+
+    Возвращает ту же структуру, что и analyze_docx().
+    """
+    doc = docx.Document(BytesIO(docx_bytes))
+    return _analyze_units(_iter_docx_text(doc))

@@ -1,4 +1,4 @@
-"""Streamlit-приложение: анализ PDF на наличие ГОСТ/ТУ/СП и выгрузка
+"""Streamlit-приложение: анализ PDF/DOCX на наличие ГОСТ/ТУ/СП и выгрузка
 перечня НТД в XLSX на основе шаблона «Перечень_НТД.xlsx».
 
 Запуск:
@@ -8,12 +8,12 @@
 что и консольная версия main.py.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
 
-from libs.pipeline import build_rows, process_pdf_bytes
+from libs.pipeline import build_rows, process_bytes
 from libs.xlsx_writer import analysis_to_xlsx_bytes
 
 DEFAULT_TEMPLATE = Path(__file__).parent / "Перечень_НТД.xlsx"
@@ -21,26 +21,26 @@ DEFAULT_TEMPLATE = Path(__file__).parent / "Перечень_НТД.xlsx"
 
 def output_filename() -> str:
     """Имя выходного файла вида YY-MM-DD_HH-MM_Перечень_НТД.xlsx."""
-    stamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-    return f"{stamp}_Перечень_НТД.xlsx"
+    timestamp = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d_%H-%M')
+    return f"{timestamp}_Перечень_НТД.xlsx"
 
 
 # ── Настройки страницы ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="Перечень НТД: PDF → XLSX",
+    page_title="PDF/DOCX → Перечень НТД",
     page_icon="📜",
     layout="centered",
 )
 
-st.title("📜 Перечень НТД: PDF → XLSX")
+st.title("📜 PDF/DOCX → Перечень НТД")
 #st.markdown(
-#    "Выберите один или несколько PDF файлов, нажав Upload, или перетащите их сюда мышкой из Проводника"
+#    "Выберите один или несколько PDF/DOCX файлов, нажав Upload, или перетащите их сюда мышкой из Проводника"
 #)
 
 # ── Загрузка файлов ─────────────────────────────────────────────────
 uploaded_files = st.file_uploader(
-    "Выберите один или несколько PDF файлов, нажав Upload, или перетащите их сюда мышкой из Проводника",
-    type=["pdf"],
+    "Выберите один или несколько PDF/DOCX файлов, нажав Upload, или перетащите их сюда мышкой из Проводника",
+    type=["pdf", "docx"],
     accept_multiple_files=True,
 )
 
@@ -63,7 +63,7 @@ if  uploaded_files:
         status = st.empty()
         for i, f in enumerate(uploaded_files):
             status.info(f"Обработка [{i + 1}/{len(uploaded_files)}]: {f.name} ...")
-            results.append(process_pdf_bytes(f.getvalue(), f.name))
+            results.append(process_bytes(f.getvalue(), f.name))
             progress.progress((i + 1) / len(uploaded_files))
 
         status.empty()
