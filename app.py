@@ -74,7 +74,7 @@ if  uploaded_files:
 
         st.subheader("Результаты обработки")
         st.write(f"Успешно обработано: **{ok_count}**, с ошибками: **{err_count}**")
-
+        #st.success(f"✅ Готово! Строк в перечне: **{len(results)}**")
         if err_count:
             st.error("Ошибки при обработке следующих файлов:")
             for r in results:
@@ -88,8 +88,8 @@ if  uploaded_files:
                 total = sum(e["count"] for e in r.gosts.values())
                 summary.append({
                     "Файл": r.file_name,
-                    "Упоминаний ГОСТ": total,
-                    "Уникальных ГОСТ": len(r.gosts),
+                    "Упоминаний НТД": total,
+                    "Уникальных НТД": len(r.gosts),
                 })
         if summary:
             st.dataframe(summary, use_container_width=True)
@@ -99,6 +99,7 @@ if  uploaded_files:
         if not rows:
             st.warning("В загруженных файлах не найдено упоминаний ГОСТ/ТУ/СП.")
             st.stop()
+   
 
         try:
             xlsx_bytes = analysis_to_xlsx_bytes(rows, DEFAULT_TEMPLATE)
@@ -106,7 +107,7 @@ if  uploaded_files:
             st.error(f"Не найден шаблон перечня НТД: {e}")
             st.stop()
 
-        st.success(f"✅ Готово! Строк в перечне: **{len(rows)}**")
+
         st.download_button(
             label="📥 Скачать XLSX файл",
             data=xlsx_bytes,
